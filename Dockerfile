@@ -57,6 +57,7 @@ LABEL org.opencontainers.image.title="Cloudflare WARP" \
 COPY --from=fs / /
 COPY entrypoint.sh healthcheck.sh /
 
+# hadolint ignore=DL3044
 ENV WARP_MODE="tunnel_only" \
     WARP_LICENSE_KEY="" \
     WARP_PROXY_PORT=40000 \

@@ -136,7 +136,10 @@ test_basic() {
 test_firewall_override() {
     run_test "firewall override" \
         -e WARP_ROUTING_OVERRIDE=1 \
-        "sleep 5 && ! nft list table inet cloudflare-warp 2>/dev/null"
+        "sleep 5 \
+         && ! nft list table inet cloudflare-warp 2>/dev/null \
+         && ! ip route show table 65743 2>/dev/null | grep -q . \
+         && ! ip rule list 2>/dev/null | grep -q 'lookup 65743'"
 }
 
 test_dns_expose() {

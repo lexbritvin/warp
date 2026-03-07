@@ -25,7 +25,7 @@ FROM ghcr.io/void-linux/void-glibc-busybox:latest AS fs
 
 RUN <<EOF
     xbps-install -Syu xbps
-    xbps-install -y dbus-libs nspr nss libgcc dbus nftables curl tini
+    xbps-install -y dbus-libs nspr nss libgcc dbus nftables curl tini iproute2
     rm -rf /var/cache/xbps/*
 EOF
 

@@ -131,9 +131,20 @@ disable_firewall() {
     nft delete chain inet cloudflare-warp input 2>/dev/null || true
     nft delete table inet cloudflare-warp 2>/dev/null || true
     ip route flush table $WARP_RT 2>/dev/null || true
-    while ip rule list 2>/dev/null | grep -q "lookup $WARP_RT"; do
-        ip rule del lookup $WARP_RT 2>/dev/null || true
-    done
+    case "${WARP_MODE:-}" in
+        warp|warp+doh)
+            # resolv.conf is locked to 127.0.2.2 by warp-svc; the DNS stub needs
+            # table 65743 to forward queries to Cloudflare. Restore the Cloudflare
+            # subnet route and keep ip rules so warp-svc's fwmarked traffic still
+            # reaches its upstream resolvers via the TUN interface.
+            ip route add table $WARP_RT 162.159.0.0/17 dev $WARP_IF proto static scope link 2>/dev/null || true
+            ;;
+        *)
+            while ip rule list 2>/dev/null | grep -q "lookup $WARP_RT"; do
+                ip rule del lookup $WARP_RT 2>/dev/null || true
+            done
+            ;;
+    esac
 }
 
 watch_firewall() {

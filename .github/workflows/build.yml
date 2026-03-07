@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 16 * * *'   # daily at 4 PM UTC
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rebuild even if version already published'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -25,7 +30,10 @@ jobs:
       - name: Check if version already published
         id: check
         run: |
-          if docker manifest inspect ghcr.io/${{ github.repository }}:${{ steps.warp.outputs.version }} > /dev/null 2>&1; then
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "Force rebuild requested."
+          elif docker manifest inspect ghcr.io/${{ github.repository }}:${{ steps.warp.outputs.version }} > /dev/null 2>&1; then
             echo "skip=true" >> $GITHUB_OUTPUT
             echo "Version ${{ steps.warp.outputs.version }} already published, skipping."
           else

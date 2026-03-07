@@ -234,14 +234,13 @@ services:
 ## Verification
 
 ```sh
-# Build and run all integration tests locally
+# Run all integration tests (builds image from current directory)
 bash test.sh
 
-# Manual spot checks
-docker compose up -d
-docker inspect warp --format '{{.State.Health.Status}}'         # → healthy
+# Spot checks against a running container
 docker exec warp curl -fsS https://cloudflare.com/cdn-cgi/trace | grep warp
-docker exec warp nft list table inet cloudflare-warp            # fails if WARP_ROUTING_OVERRIDE=1
+docker exec warp nft list table inet cloudflare-warp   # fails when WARP_ROUTING_OVERRIDE=1
+docker inspect warp --format '{{.State.Health.Status}}'
 ```
 
 CI runs `test.sh` automatically before any image push. A failing test prevents publication.

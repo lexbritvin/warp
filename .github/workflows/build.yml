@@ -51,7 +51,7 @@ jobs:
 
       - name: Run integration tests
         if: steps.check.outputs.skip == 'false'
-        run: bash test.sh warp:test
+        run: bash test.sh --ci warp:test
 
       - name: Login to GHCR
         if: steps.check.outputs.skip == 'false'

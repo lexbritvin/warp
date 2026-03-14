@@ -72,6 +72,10 @@ docker exec warp curl -fsS https://cloudflare.com/cdn-cgi/trace | grep warp
 
 ## Feature flags
 
+### `WARP_MSS_CLAMP=1`
+
+Clamps TCP MSS to the path MTU for forwarded traffic through the WARP TUN interface. Required because the CloudflareWARP interface has a low MTU (~1280 bytes); without this, large TCP segments (e.g. TLS handshakes) are silently dropped after WARP encapsulation. Enabled by default. Set to `0` only if your routing daemon handles MSS clamping itself.
+
 ### `WARP_ROUTING_OVERRIDE=1`
 
 Strips all WARP-managed nftables chains (`input`, `output`, `tun` in `inet cloudflare-warp`) and flushes WARP's policy routing table (65743). The tunnel stays up — only the kernel routing rules are removed, giving you a clean slate to apply your own routing policy.
@@ -105,6 +109,7 @@ Enables WARP qlog debug output. Disabled by default.
 | `WARP_PROXY_PORT` | `40000` | SOCKS5 proxy port. |
 | `WARP_FAMILIES_MODE` | `off` | DNS families filtering: `off`, `full`, `malware`. |
 | `WARP_ROUTING_OVERRIDE` | `0` | Strip WARP nftables and routing table. Set to `1` to enable. |
+| `WARP_MSS_CLAMP` | `1` | Clamp TCP MSS to path MTU for forwarded traffic. Disable only if your routing daemon handles this. |
 | `WARP_DNS_EXPOSE` | `0` | DNAT port 53 to Cloudflare DNS. Set to `1` to enable. |
 | `WARP_PROXY_EXPOSE` | `0` | DNAT SOCKS5 port to loopback for port mapping. Set to `1` to enable. |
 | `WARP_CONSUMER_REGISTER` | _(empty)_ | Force consumer registration even when `mdm.xml` exists. |

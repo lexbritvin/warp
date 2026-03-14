@@ -297,6 +297,25 @@ test_reconnect_firewall_watcher() {
          && ! nft list table inet cloudflare-warp 2>/dev/null"
 }
 
+test_mss_clamp_default() {
+    run_test "mss clamp default on" \
+        "nft list chain inet cf-custom cf-mss 2>/dev/null | grep -q 'maxseg'"
+}
+
+test_mss_clamp_disabled() {
+    run_test "mss clamp disabled" \
+        -e WARP_MSS_CLAMP=0 \
+        "! nft list chain inet cf-custom cf-mss 2>/dev/null"
+}
+
+test_mss_clamp_routing_override() {
+    run_test "mss clamp preserved with routing override" \
+        -e WARP_ROUTING_OVERRIDE=1 \
+        "sleep 5 \
+         && ! nft list table inet cloudflare-warp 2>/dev/null \
+         && nft list chain inet cf-custom cf-mss 2>/dev/null | grep -q 'maxseg'"
+}
+
 # ── Run ──────────────────────────────────────────────────────────────────────
 
 if [ "$CI" = "1" ]; then
@@ -314,6 +333,9 @@ else
     test_state_persistence
     test_graceful_shutdown
     test_reconnect_firewall_watcher
+    test_mss_clamp_default
+    test_mss_clamp_disabled
+    test_mss_clamp_routing_override
 fi
 
 printf "\n==============================\n"

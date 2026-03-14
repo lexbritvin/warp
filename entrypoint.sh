@@ -89,8 +89,19 @@ fi
 echo "Connecting to WARP"
 warp-cli connect
 
-# Export DNS for attached containers.
+# Clamp TCP MSS to path MTU for forwarded traffic through the WARP TUN.
+# Required because CloudflareWARP has a low MTU (1280); without this, large TCP
+# segments (e.g. TLS handshake) get silently dropped after WARP encapsulation.
+# Equivalent to: iptables -t mangle -A FORWARD -o $WARP_IF -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 nft add table inet cf-custom || true
+if [ "${WARP_MSS_CLAMP:-1}" = "1" ]; then
+    nft add chain inet cf-custom cf-mss "{ type filter hook forward priority mangle; }" 2>/dev/null || true
+    nft add rule inet cf-custom cf-mss oifname "$WARP_IF" 'tcp flags & (syn|rst) == syn tcp option maxseg size set rt mtu' 2>/dev/null || true
+else
+    nft delete chain inet cf-custom cf-mss 2>/dev/null || true
+fi
+
+# Export DNS for attached containers.
 if [ "${WARP_DNS_EXPOSE:-0}" = "1" ]; then
     echo "Expose local Cloudflare DNS server port"
     nft add chain inet cf-custom cf-dns-prerouting "{ type nat hook prerouting priority -100; }"

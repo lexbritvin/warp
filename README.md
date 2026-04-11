@@ -10,7 +10,7 @@ The smallest, most complete way to run [Cloudflare WARP](https://developers.clou
 ---
 
 - **Tiny scratch-based image** — binaries extracted from Cloudflare's official `.deb`, stripped, running on a minimal Void Linux glibc runtime. No Ubuntu, no package manager overhead.
-- **Bare TUN for custom routing** — `WARP_ROUTING_OVERRIDE` removes WARP's nftables policy and routing table, leaving a clean TUN interface you control. Compose in sing-box or any routing daemon without fighting WARP's defaults.
+- **Bare TUN or NAT router** — `WARP_ROUTING_OVERRIDE=unmanaged` strips WARP's nftables policy and routing table for full manual control (sing-box, custom routing daemons). `WARP_ROUTING_OVERRIDE=router` keeps WARP's policy intact and adds source-NAT so peer containers on a Docker bridge can route through the WARP tunnel.
 - **Shared DNS and SOCKS5 without a sidecar** — `WARP_DNS_EXPOSE` and `WARP_PROXY_EXPOSE` use nftables DNAT to make Cloudflare DNS and the WARP SOCKS5 proxy available across the shared network namespace.
 - **Full tunnel, proxy, or DNS-only** — six `WARP_MODE` values cover every WARP operating mode, switchable without rebuilding.
 - **Zero Trust via MDM** — mount `mdm.xml` for managed enrollment; falls back to consumer registration automatically.
@@ -66,7 +66,8 @@ docker exec warp curl -fsS https://cloudflare.com/cdn-cgi/trace | grep warp
 | Route all traffic + Cloudflare DNS | `WARP_MODE=warp` |
 | SOCKS5 proxy, no system tunnel | `WARP_MODE=proxy` |
 | DNS filtering only | `WARP_MODE=doh` |
-| Bare tunnel, full manual routing control | `WARP_MODE=tunnel_only` + `WARP_ROUTING_OVERRIDE=1` |
+| Bare tunnel, full manual routing control | `WARP_MODE=tunnel_only` + `WARP_ROUTING_OVERRIDE=unmanaged` |
+| NAT gateway for peer containers on a Docker bridge | `WARP_MODE=warp` + `WARP_ROUTING_OVERRIDE=router` |
 
 ---
 
@@ -76,11 +77,29 @@ docker exec warp curl -fsS https://cloudflare.com/cdn-cgi/trace | grep warp
 
 Clamps TCP MSS to the path MTU for forwarded traffic through the WARP TUN interface. Required because the CloudflareWARP interface has a low MTU (~1280 bytes); without this, large TCP segments (e.g. TLS handshakes) are silently dropped after WARP encapsulation. Enabled by default. Set to `0` only if your routing daemon handles MSS clamping itself.
 
-### `WARP_ROUTING_OVERRIDE=1`
+### `WARP_ROUTING_OVERRIDE`
 
-Strips all WARP-managed nftables chains (`input`, `output`, `tun` in `inet cloudflare-warp`) and flushes WARP's policy routing table (65743). The tunnel stays up — only the kernel routing rules are removed, giving you a clean slate to apply your own routing policy.
+Semantic mode selector controlling how warp interacts with Cloudflare's own nftables policy and routing.
 
-Re-applies on every reconnect via `nft monitor`. Pair with `net.ipv4.ip_forward=1` and `net.ipv6.conf.all.forwarding=1` sysctls when attaching containers that need TUN-based routing (e.g. sing-box in TUN mode).
+| Value | Behavior |
+|---|---|
+| `none` (default) — also `0`, unset | No intervention. Cloudflare manages its own firewall and routing. |
+| `unmanaged` — also `1` | Strips all WARP-managed nftables chains (`input`, `output`, `tun` in `inet cloudflare-warp`) and flushes WARP's policy routing table (65743). The tunnel stays up — only the kernel routing rules are removed, giving you a clean slate to apply your own routing policy. Re-applies on every reconnect via `nft monitor`. Pair with `net.ipv4.ip_forward=1` and `net.ipv6.conf.all.forwarding=1` when attaching containers that need TUN-based routing (e.g. sing-box in TUN mode). |
+| `router` | Leaves Cloudflare's nftables policy and routing table 65743 fully intact (Zero Trust split-tunnel, whitelist, and `warp-cli tunnel ip add` rules keep working). Installs a single source-NAT chain (`cf-router-nat`) that masquerades peer-container traffic leaving `CloudflareWARP` to warp's TUN address — both IPv4 and IPv6. Works with `WARP_MODE=warp`, `warp+doh`, or `tunnel_only` (warp-svc populates table 65743 the same way in all three). No-ops under `proxy` / `doh` modes (no TUN). |
+
+Backward compatibility: `1` continues to mean `unmanaged` and `0` continues to mean `none`. Any unrecognized value is treated as `none`.
+
+**Security note.** `router` mode makes warp an **open NAT gateway** on the Docker network it is attached to. Any container that can reach warp's bridge IP can egress through the WARP tunnel with no authentication. Fine for a single-host dev setup; audit carefully before using on a shared or multi-tenant host, and prefer a dedicated Docker network for the warp + peer containers.
+
+**`router` mode prerequisites** (set externally on the warp container):
+
+```yaml
+sysctls:
+  - net.ipv4.ip_forward=1
+  - net.ipv4.conf.all.rp_filter=0      # asymmetric path: in via eth0, out via CloudflareWARP
+  - net.ipv6.conf.all.forwarding=1
+  - net.ipv6.conf.all.accept_ra=2      # forwarding disables RA processing; =2 re-enables it
+```
 
 ### `WARP_DNS_EXPOSE=1`
 
@@ -108,7 +127,7 @@ Enables WARP qlog debug output. Disabled by default.
 | `WARP_LICENSE_KEY` | _(empty)_ | WARP+ or Teams license key. Applied after registration. |
 | `WARP_PROXY_PORT` | `40000` | SOCKS5 proxy port. |
 | `WARP_FAMILIES_MODE` | `off` | DNS families filtering: `off`, `full`, `malware`. |
-| `WARP_ROUTING_OVERRIDE` | `0` | Strip WARP nftables and routing table. Set to `1` to enable. |
+| `WARP_ROUTING_OVERRIDE` | `none` | Routing override mode: `none` (default), `unmanaged` (= legacy `1`, strip WARP nft + table 65743), or `router` (NAT gateway for peer containers). |
 | `WARP_MSS_CLAMP` | `1` | Clamp TCP MSS to path MTU for forwarded traffic. Disable only if your routing daemon handles this. |
 | `WARP_DNS_EXPOSE` | `0` | DNAT port 53 to Cloudflare DNS. Set to `1` to enable. |
 | `WARP_PROXY_EXPOSE` | `0` | DNAT SOCKS5 port to loopback for port mapping. Set to `1` to enable. |
@@ -200,7 +219,59 @@ services:
       - ./config/singbox:/etc/sing-box
 ```
 
-### 4. Zero Trust enrollment
+### 4. NAT gateway: peer containers route through WARP
+
+```yaml
+services:
+  warp:
+    image: ghcr.io/lexbritvin/warp:latest
+    restart: unless-stopped
+    device_cgroup_rules:
+      - 'c 10:200 rwm'
+    environment:
+      WARP_MODE: "warp"
+      WARP_ROUTING_OVERRIDE: "router"
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.rp_filter=0
+      - net.ipv6.conf.all.forwarding=1
+      - net.ipv6.conf.all.accept_ra=2
+    networks:
+      warp-net:
+
+  peer:
+    image: curlimages/curl
+    cap_add:
+      - NET_ADMIN
+    user: "0:0"
+    sysctls:
+      - net.ipv4.conf.all.rp_filter=0
+    depends_on:
+      warp:
+        condition: service_healthy
+    networks:
+      warp-net:
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        ip route replace default via $$(getent hosts warp | awk '{print $$1}')
+        curl -fsS https://cloudflare.com/cdn-cgi/trace
+
+networks:
+  warp-net:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd00:dead:beef::/64
+```
+
+Unlike Recipe 1 (`network_mode: service:warp`, where peer shares warp's netns), this pattern keeps each peer container in its own netns on a Docker bridge and uses warp purely as a NAT gateway. WARP's own Zero Trust split-tunnel and `warp-cli tunnel ip add` rules continue to work because we don't strip its nftables policy.
+
+### 5. Zero Trust enrollment
 
 ```yaml
 services:
@@ -244,7 +315,8 @@ bash test.sh
 
 # Spot checks against a running container
 docker exec warp curl -fsS https://cloudflare.com/cdn-cgi/trace | grep warp
-docker exec warp nft list table inet cloudflare-warp   # fails when WARP_ROUTING_OVERRIDE=1
+docker exec warp nft list table inet cloudflare-warp   # absent in unmanaged mode, present in router/none
+docker exec warp nft list chain inet cf-custom cf-router-nat   # present in router mode
 docker inspect warp --format '{{.State.Health.Status}}'
 ```
 

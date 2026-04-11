@@ -316,6 +316,132 @@ test_mss_clamp_routing_override() {
          && nft list chain inet cf-custom cf-mss 2>/dev/null | grep -q 'maxseg'"
 }
 
+test_routing_override_none() {
+    run_test "routing override none (no intervention)" \
+        -e WARP_ROUTING_OVERRIDE=none \
+        "sleep 5 \
+         && nft list table inet cloudflare-warp > /dev/null \
+         && ! nft list chain inet cf-custom cf-router-nat 2>/dev/null"
+}
+
+test_routing_override_router() {
+    run_test "routing override router (state)" \
+        -e WARP_MODE=warp \
+        -e WARP_ROUTING_OVERRIDE=router \
+        --sysctl net.ipv4.ip_forward=1 \
+        --sysctl net.ipv4.conf.all.rp_filter=0 \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
+        --sysctl net.ipv6.conf.all.accept_ra=2 \
+        "sleep 12 \
+         && nft list table inet cloudflare-warp > /dev/null \
+         && nft list chain inet cf-custom cf-router-nat | grep -q masquerade"
+}
+
+test_routing_override_router_reconnect() {
+    run_test "routing override router (reconnect repair)" \
+        -e WARP_MODE=warp \
+        -e WARP_ROUTING_OVERRIDE=router \
+        --sysctl net.ipv4.ip_forward=1 \
+        --sysctl net.ipv4.conf.all.rp_filter=0 \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
+        --sysctl net.ipv6.conf.all.accept_ra=2 \
+        "warp-cli disconnect \
+         && sleep 2 \
+         && warp-cli connect \
+         && sleep 8 \
+         && nft list table inet cloudflare-warp > /dev/null \
+         && nft list chain inet cf-custom cf-router-nat | grep -q masquerade"
+}
+
+test_routing_override_router_forwarded() {
+    printf "\nTest: routing override router (forwarded traffic)\n"
+    net="warp-router-fwd-$$"
+    docker network create --ipv6 --subnet fd00:dead:beef::/64 "$net" > /dev/null 2>&1 \
+        || { fail "router forwarded" "docker network create failed"; return; }
+
+    warp_ctr=$(docker run -d \
+        --network "$net" \
+        --cap-add NET_ADMIN \
+        --cap-add MKNOD \
+        --cap-add AUDIT_WRITE \
+        --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+        --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+        --sysctl net.ipv4.ip_forward=1 \
+        --sysctl net.ipv4.conf.all.rp_filter=0 \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
+        --sysctl net.ipv6.conf.all.accept_ra=2 \
+        --device-cgroup-rule 'c 10:200 rwm' \
+        --health-interval=5s \
+        -e WARP_MODE=warp \
+        -e WARP_ROUTING_OVERRIDE=router \
+        "$IMAGE") || { fail "router forwarded" "warp run failed"; docker network rm "$net" > /dev/null 2>&1; return; }
+
+    if ! wait_healthy "$warp_ctr"; then
+        fail "router forwarded" "warp container not healthy"
+        docker rm -f "$warp_ctr" > /dev/null 2>&1
+        docker network rm "$net" > /dev/null 2>&1
+        return
+    fi
+
+    # Give the watcher one cycle to install cf-router-nat after warp connects.
+    sleep 3
+
+    warp_v4=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$warp_ctr")
+    warp_v6=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").GlobalIPv6Address}}" "$warp_ctr")
+
+    # Peer container helper: override default route to point at warp's bridge
+    # IP, then curl. --user 0:0 because curlimages/curl runs as non-root by
+    # default and cannot rewrite routes even with NET_ADMIN.
+    peer_curl() {
+        family=$1
+        docker run --rm \
+            --network "$net" \
+            --cap-add NET_ADMIN \
+            --user 0:0 \
+            --sysctl net.ipv4.conf.all.rp_filter=0 \
+            curlimages/curl sh -c "
+set -e
+ip route replace default via $warp_v4
+[ -n '$warp_v6' ] && ip -6 route replace default via $warp_v6
+curl -fsS -$family --max-time 15 https://cloudflare.com/cdn-cgi/trace | grep -q 'warp=on'
+" > /dev/null 2>&1
+    }
+
+    if peer_curl 4; then
+        pass "router forwarded (ipv4)"
+    else
+        fail "router forwarded (ipv4)" "peer curl did not see warp=on"
+        docker logs "$warp_ctr" 2>&1 | tail -15
+    fi
+
+    # Best-effort IPv6 leg: warp-svc may not always have a global v6.
+    if [ -n "$warp_v6" ]; then
+        if peer_curl 6; then
+            pass "router forwarded (ipv6)"
+        else
+            fail "router forwarded (ipv6)" "peer curl did not see warp=on"
+            docker logs "$warp_ctr" 2>&1 | tail -15
+        fi
+    else
+        echo "  SKIP: router forwarded (ipv6) — no global v6 on TUN"
+    fi
+
+    docker rm -f "$warp_ctr" > /dev/null 2>&1
+    docker network rm "$net" > /dev/null 2>&1
+}
+
+test_routing_override_router_tunnel_only() {
+    run_test "routing override router + tunnel_only" \
+        -e WARP_MODE=tunnel_only \
+        -e WARP_ROUTING_OVERRIDE=router \
+        --sysctl net.ipv4.ip_forward=1 \
+        --sysctl net.ipv4.conf.all.rp_filter=0 \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
+        --sysctl net.ipv6.conf.all.accept_ra=2 \
+        "sleep 10 \
+         && nft list chain inet cf-custom cf-router-nat | grep -q masquerade"
+}
+
 # ── Run ──────────────────────────────────────────────────────────────────────
 
 if [ "$CI" = "1" ]; then
@@ -336,6 +462,11 @@ else
     test_mss_clamp_default
     test_mss_clamp_disabled
     test_mss_clamp_routing_override
+    test_routing_override_none
+    test_routing_override_router
+    test_routing_override_router_tunnel_only
+    test_routing_override_router_reconnect
+    test_routing_override_router_forwarded
 fi
 
 printf "\n==============================\n"

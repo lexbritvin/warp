@@ -125,7 +125,29 @@ else
     nft del chain inet cf-custom cf-proxy-prerouting || true
 fi
 
-# Routing override: strip all WARP nftables chains and routing policy table.
+# Routing override mode. Backward compat: 1=unmanaged, 0=none.
+case "${WARP_ROUTING_OVERRIDE:-0}" in
+    unmanaged|1) WARP_ROUTING_MODE=unmanaged ;;
+    router)      WARP_ROUTING_MODE=router ;;
+    *)           WARP_ROUTING_MODE=none ;;
+esac
+
+# Router mode needs kernel forwarding and relaxed reverse-path filter because
+# peer-container traffic enters on the bridge and leaves on CloudflareWARP.
+# Warn loudly once at startup — misconfigured sysctls fail silently at runtime
+# (masquerade installs fine but packets get dropped).
+if [ "$WARP_ROUTING_MODE" = "router" ]; then
+    check_sysctl() {
+        name=$1; want=$2
+        path="/proc/sys/$(echo "$name" | tr . /)"
+        got=$(cat "$path" 2>/dev/null || echo "?")
+        [ "$got" = "$want" ] || echo "WARNING: router mode needs $name=$want (got: $got)"
+    }
+    check_sysctl net.ipv4.ip_forward 1
+    check_sysctl net.ipv4.conf.all.rp_filter 0
+    check_sysctl net.ipv6.conf.all.forwarding 1
+fi
+
 cf_nft_rules_exist() {
     nft list table inet cloudflare-warp > /dev/null 2>&1
 }
@@ -158,25 +180,58 @@ disable_firewall() {
     esac
 }
 
+# Router mode: make warp act as a router for traffic forwarded from peer
+# containers via a Docker bridge. Cloudflare's own nftables policy already
+# permits forward (chain forward has policy accept) and table 65743 is already
+# populated with subnet decomposition covering public IPs via the TUN, so the
+# only thing missing is source NAT: rewrite the peer's bridge source IP to
+# warp's TUN IP so the inner packet has the source Cloudflare expects.
+# Idempotent — re-runs every watch cycle to refresh the rule with the current
+# TUN address (warp-svc may rotate it on reconnect). Silently no-ops in modes
+# without a TUN (proxy, doh).
+configure_router_mode() {
+    warp_ip4=$(ip -4 addr show "$WARP_IF" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
+    [ -n "$warp_ip4" ] || return 0
+    warp_ip6=$(ip -6 addr show "$WARP_IF" scope global 2>/dev/null | awk '/inet6/{print $2; exit}' | cut -d/ -f1)
+
+    # Single atomic transaction: create the chain if missing, flush, add rules.
+    # Observers never see an empty chain mid-cycle even though the watcher and
+    # its polling fallback both call this every ~2s.
+    {
+        echo 'add chain inet cf-custom cf-router-nat { type nat hook postrouting priority 100; }'
+        echo 'flush chain inet cf-custom cf-router-nat'
+        echo "add rule inet cf-custom cf-router-nat oifname \"$WARP_IF\" ip saddr != $warp_ip4 masquerade"
+        [ -n "$warp_ip6" ] && \
+            echo "add rule inet cf-custom cf-router-nat oifname \"$WARP_IF\" ip6 saddr != $warp_ip6 masquerade"
+    } | nft -f - 2>/dev/null || true
+}
+
+routing_override_apply() {
+    case "$WARP_ROUTING_MODE" in
+        unmanaged) disable_firewall ;;
+        router)    configure_router_mode ;;
+    esac
+}
+
 watch_firewall() {
     # Polling fallback: handles events missed by monitor (e.g. table created between
-    # disable_firewall return and nft monitor start)
-    (while true; do disable_firewall; sleep 2; done) &
+    # routing_override_apply return and nft monitor start)
+    (while true; do routing_override_apply; sleep 2; done) &
     # Event-driven: react immediately when WARP modifies its rules
-    disable_firewall
+    routing_override_apply
     while true; do
         nft monitor 2>/dev/null | while IFS= read -r line; do
             case "$line" in
-                *cloudflare-warp*) disable_firewall ;;
+                *cloudflare-warp*) routing_override_apply ;;
             esac
         done
-        disable_firewall
+        routing_override_apply
         sleep 1
     done
 }
 
-if [ "${WARP_ROUTING_OVERRIDE:-0}" = "1" ]; then
-    echo "Watching Cloudflare firewall to override"
+if [ "$WARP_ROUTING_MODE" != "none" ]; then
+    echo "Routing override mode: $WARP_ROUTING_MODE"
     watch_firewall &
     FIREWALL_WATCHER_PID=$!
 fi

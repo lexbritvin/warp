@@ -442,7 +442,42 @@ test_routing_override_router_tunnel_only() {
          && nft list chain inet cf-custom cf-router-nat | grep -q masquerade"
 }
 
+test_routing_override_router_routes() {
+    run_test "routing override router + router routes" \
+        -e WARP_MODE=tunnel_only \
+        -e WARP_ROUTING_OVERRIDE=router \
+        -e 'WARP_ROUTER_ROUTES=dst=10.99.0.0/24,via=127.0.0.1; dst=fd99::/64,via=::1' \
+        --sysctl net.ipv4.ip_forward=1 \
+        --sysctl net.ipv4.conf.all.rp_filter=0 \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
+        --sysctl net.ipv6.conf.all.accept_ra=2 \
+        "sleep 10 \
+         && ip route show 10.99.0.0/24 | grep -q '127.0.0.1' \
+         && ip -6 route show fd99::/64 | grep -q '::1'"
+}
+
+test_routing_override_router_routes_malformed() {
+    run_test "routing override router + malformed router routes" \
+        -e WARP_MODE=tunnel_only \
+        -e WARP_ROUTING_OVERRIDE=router \
+        -e 'WARP_ROUTER_ROUTES=garbage; dst=10.99.0.0/24,via=127.0.0.1' \
+        --sysctl net.ipv4.ip_forward=1 \
+        --sysctl net.ipv4.conf.all.rp_filter=0 \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
+        --sysctl net.ipv6.conf.all.accept_ra=2 \
+        "sleep 10 \
+         && ip route show 10.99.0.0/24 | grep -q '127.0.0.1'"
+}
+
 # ── Run ──────────────────────────────────────────────────────────────────────
+
+# Host-side parser unit tests — no docker required.
+printf "\nRunning host-side parser tests\n"
+if ./test-router-routes.sh; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+fi
 
 if [ "$CI" = "1" ]; then
     test_smoke
@@ -467,6 +502,8 @@ else
     test_routing_override_router_tunnel_only
     test_routing_override_router_reconnect
     test_routing_override_router_forwarded
+    test_routing_override_router_routes
+    test_routing_override_router_routes_malformed
 fi
 
 printf "\n==============================\n"

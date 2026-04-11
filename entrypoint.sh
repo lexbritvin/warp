@@ -5,6 +5,8 @@ set -e
 WARP_IF="CloudflareWARP"
 WARP_RT=65743
 
+. /router-routes.sh
+
 handle_shutdown() {
     echo "Received $1"
     echo "Disconnecting..."
@@ -148,6 +150,15 @@ if [ "$WARP_ROUTING_MODE" = "router" ]; then
     check_sysctl net.ipv6.conf.all.forwarding 1
 fi
 
+WARP_ROUTER_ROUTES_LIST=
+if [ -n "${WARP_ROUTER_ROUTES:-}" ]; then
+    if [ "$WARP_ROUTING_MODE" != "router" ]; then
+        echo "WARNING: WARP_ROUTER_ROUTES is set but WARP_ROUTING_OVERRIDE is not 'router' — ignoring"
+    else
+        parse_router_routes "$WARP_ROUTER_ROUTES"
+    fi
+fi
+
 cf_nft_rules_exist() {
     nft list table inet cloudflare-warp > /dev/null 2>&1
 }
@@ -204,6 +215,8 @@ configure_router_mode() {
         [ -n "$warp_ip6" ] && \
             echo "add rule inet cf-custom cf-router-nat oifname \"$WARP_IF\" ip6 saddr != $warp_ip6 masquerade"
     } | nft -f - 2>/dev/null || true
+
+    apply_router_routes
 }
 
 routing_override_apply() {

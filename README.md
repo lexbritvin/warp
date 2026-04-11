@@ -101,6 +101,18 @@ sysctls:
   - net.ipv6.conf.all.accept_ra=2      # forwarding disables RA processing; =2 re-enables it
 ```
 
+### `WARP_ROUTER_ROUTES`
+
+Static routes installed in the warp container for return traffic in `router` mode. Needed when peer containers forward traffic from subnets that aren't directly connected to warp's bridge — e.g. a WG-easy + sing-box chain where WireGuard clients live on `10.20.0.0/24` behind sing-box at `10.20.1.3`. Replies come back through the WARP tunnel, get un-masqueraded to the client address, and warp has no route back — so return packets go to the default gateway and are lost.
+
+Format: semicolon-separated entries, each `dst=CIDR,via=GW`. Family (IPv4/IPv6) is auto-detected from the destination. The format is strict: no whitespace around `=`, no extra fields. Malformed entries, obviously broken CIDRs, and any attempt to install a default route (`0.0.0.0/0`, `::/0`, `default`, or any `/0` prefix) are logged and skipped — not fatal. Rejecting default routes is deliberate: `ip route replace` would otherwise clobber the container/host's own default and silently break egress.
+
+```
+WARP_ROUTER_ROUTES=dst=10.20.0.0/24,via=10.20.1.3; dst=fd3d:99e:5f4c:a::/64,via=fd3d:99e:5f4c:a1::3
+```
+
+Routes are installed via `ip route replace` inside the same watcher that maintains the router-mode NAT chain, so they're re-applied every ~2 s and survive any `warp-svc` route rewrites. Ignored with a warning outside `router` mode.
+
 ### `WARP_DNS_EXPOSE=1`
 
 DNATs port 53 (UDP + TCP) to `127.0.2.2:53`, making the Cloudflare DNS resolver available to attached containers. Most useful with `WARP_MODE=warp` or `warp+doh`.
@@ -128,6 +140,7 @@ Enables WARP qlog debug output. Disabled by default.
 | `WARP_PROXY_PORT` | `40000` | SOCKS5 proxy port. |
 | `WARP_FAMILIES_MODE` | `off` | DNS families filtering: `off`, `full`, `malware`. |
 | `WARP_ROUTING_OVERRIDE` | `none` | Routing override mode: `none` (default), `unmanaged` (= legacy `1`, strip WARP nft + table 65743), or `router` (NAT gateway for peer containers). |
+| `WARP_ROUTER_ROUTES` | _(empty)_ | Static return routes for `router` mode. Semicolon-separated `dst=CIDR,via=GW` entries; family auto-detected. |
 | `WARP_MSS_CLAMP` | `1` | Clamp TCP MSS to path MTU for forwarded traffic. Disable only if your routing daemon handles this. |
 | `WARP_DNS_EXPOSE` | `0` | DNAT port 53 to Cloudflare DNS. Set to `1` to enable. |
 | `WARP_PROXY_EXPOSE` | `0` | DNAT SOCKS5 port to loopback for port mapping. Set to `1` to enable. |

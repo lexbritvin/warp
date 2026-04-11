@@ -55,7 +55,7 @@ LABEL org.opencontainers.image.title="Cloudflare WARP" \
       org.opencontainers.image.licenses="MIT"
 
 COPY --from=fs / /
-COPY entrypoint.sh healthcheck.sh /
+COPY entrypoint.sh healthcheck.sh router-routes.sh /
 
 # hadolint ignore=DL3044
 ENV WARP_MODE="tunnel_only" \
@@ -63,6 +63,7 @@ ENV WARP_MODE="tunnel_only" \
     WARP_PROXY_PORT=40000 \
     WARP_FAMILIES_MODE=off \
     WARP_ROUTING_OVERRIDE=0 \
+    WARP_ROUTER_ROUTES="" \
     WARP_MSS_CLAMP=1 \
     WARP_DNS_EXPOSE=0 \
     WARP_PROXY_EXPOSE=0 \

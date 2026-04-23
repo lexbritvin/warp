@@ -12,7 +12,7 @@ handle_shutdown() {
     echo "Disconnecting..."
     warp-cli disconnect || true
     echo "Stopping warp-svc and dbus..."
-    kill ${FIREWALL_WATCHER_PID:-} $WARP_PID $DBUS_PID || true
+    kill ${FIREWALL_WATCHER_PID:-} $WARP_PID $DBUS_PID ${WARP_LOG_FILTER_PID:-} || true
     echo "Finished"
     trap - EXIT
 }
@@ -46,7 +46,20 @@ echo "Starting warp-svc"
 mkdir -p $STATE_DIRECTORY
 mkdir -p $RUNTIME_DIRECTORY
 mkdir -p $LOGS_DIRECTORY
-warp-svc &
+
+# warp-svc's power_notifier module subscribes to systemd-logind for desktop
+# suspend/resume. Containers have no logind (and often no system D-Bus
+# socket either), so it retries every ~3s and floods docker logs with WARN
+# and DEBUG lines referencing the power_notifier module. Drop those; other
+# dbus errors (if any appear) stay visible.
+# Named pipe keeps $! = warp-svc (signal handling stays correct) — a bare
+# `warp-svc | grep` would give us grep's PID instead.
+WARP_LOG_FIFO="$RUNTIME_DIRECTORY/warp-svc.log.fifo"
+rm -f "$WARP_LOG_FIFO"
+mkfifo -m 0600 "$WARP_LOG_FIFO"
+grep -vE 'power_notifier|login1' < "$WARP_LOG_FIFO" >&2 &
+WARP_LOG_FILTER_PID=$!
+warp-svc > "$WARP_LOG_FIFO" 2>&1 &
 WARP_PID=$!
 
 echo "Waiting for the warp-svc to start"
@@ -230,8 +243,6 @@ watch_firewall() {
     # Polling fallback: handles events missed by monitor (e.g. table created between
     # routing_override_apply return and nft monitor start)
     (while true; do routing_override_apply; sleep 2; done) &
-    # Event-driven: react immediately when WARP modifies its rules
-    routing_override_apply
     while true; do
         nft monitor 2>/dev/null | while IFS= read -r line; do
             case "$line" in
@@ -243,8 +254,30 @@ watch_firewall() {
     done
 }
 
+# Wait for CloudflareWARP to have a usable address. Without this, the first
+# configure_router_mode() call returns early (no warp_ip4) and peer traffic
+# reaches warp-svc before cf-router-nat is installed → martian drops +
+# un-masqueraded conntrack entries that outlive the race window.
+wait_for_tun_ready() {
+    [ "$WARP_ROUTING_MODE" = "router" ] || return 0
+    i=0
+    while [ $i -lt 20 ]; do
+        if ip -4 addr show "$WARP_IF" 2>/dev/null | grep -q 'inet '; then
+            return 0
+        fi
+        sleep 0.5
+        i=$((i + 1))
+    done
+    echo "WARNING: $WARP_IF has no IPv4 address after 10s — cf-router-nat will install on next watcher cycle"
+}
+
 if [ "$WARP_ROUTING_MODE" != "none" ]; then
     echo "Routing override mode: $WARP_ROUTING_MODE"
+    # Synchronous first pass: close the start-up race before peers (gated on
+    # healthcheck) start forwarding traffic. The watcher handles reconnects
+    # and any later WARP-side rule changes.
+    wait_for_tun_ready
+    routing_override_apply
     watch_firewall &
     FIREWALL_WATCHER_PID=$!
 fi

@@ -2,7 +2,7 @@
 
 The smallest, most complete way to run [Cloudflare WARP](https://developers.cloudflare.com/cloudflare-one/connections/connect-devices/warp/) in a container.
 
-**Image tags follow the official Cloudflare WARP binary version.** A daily CI build checks for new WARP releases and publishes a matching tag (e.g. `2024.6.474.0`) plus `latest` automatically — no manual tracking needed.
+**Image tags combine the upstream Cloudflare WARP binary version with a semver for the image itself**: `<warp-version>-<image-version>` (e.g. `2024.6.474.0-1.0.0`). The image version is driven by git tags (`v1.0.0`, `v1.0.1`, …) — bump it when entrypoint, healthcheck, or packaging logic changes. A daily CI build also rebuilds on new WARP releases keeping the current image version, so `latest` always points at the freshest combination. Mutable aliases: `<warp-version>` (newest image for that WARP) and `latest`.
 
 [![Build](https://github.com/lexbritvin/warp/actions/workflows/build.yml/badge.svg)](https://github.com/lexbritvin/warp/actions/workflows/build.yml)
 [![Image](https://img.shields.io/badge/ghcr.io-lexbritvin%2Fwarp-blue?logo=docker)](https://ghcr.io/lexbritvin/warp)

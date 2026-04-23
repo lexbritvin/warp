@@ -23,9 +23,60 @@ fi
 
 PASS=0
 FAIL=0
+SHARED_STATE_VOL=""
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL + 1)); }
+
+# Warm up one WARP registration into a shared docker volume, then reuse
+# /var/lib/cloudflare-warp across every run_test. Without this, Cloudflare's
+# registration API rate-limits the ~10th consecutive test (same source IP in
+# rapid succession) and the container never finishes connecting → "not
+# healthy". One registration per test run is enough for any non-persistence
+# scenario; tests that specifically exercise fresh registration
+# (state_persistence) use their own volume and bypass this.
+#
+# Stable name (not $$) so local dev re-runs reuse the warmed registration
+# across invocations. CI is ephemeral so it still warms once per workflow.
+seed_shared_state() {
+    vol="warp-test-shared-state"
+    docker volume inspect "$vol" > /dev/null 2>&1 || docker volume create "$vol" > /dev/null
+
+    # If reg.json is already there, skip the warm-up container entirely.
+    if docker run --rm --entrypoint /bin/sh \
+        --volume "$vol:/state" "$IMAGE" \
+        -c '[ -f /state/reg.json ]' 2>/dev/null; then
+        SHARED_STATE_VOL="$vol"
+        echo "Shared WARP state: reusing existing $vol"
+        return 0
+    fi
+
+    echo "Warming up shared WARP registration in volume $vol..."
+    ctr=$(docker run -d \
+        --cap-add NET_ADMIN --cap-add MKNOD --cap-add AUDIT_WRITE \
+        --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+        --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+        --device-cgroup-rule 'c 10:200 rwm' \
+        --volume "$vol:/var/lib/cloudflare-warp" \
+        "$IMAGE") || return 1
+
+    i=0
+    while [ $i -lt 40 ]; do
+        if docker exec "$ctr" sh -c "[ -f /var/lib/cloudflare-warp/reg.json ]" 2>/dev/null; then
+            docker rm -f "$ctr" > /dev/null 2>&1 || true
+            SHARED_STATE_VOL="$vol"
+            echo "Shared WARP state: registered → $vol"
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    echo "  WARN: registration warm-up timed out — tests will register individually (may hit rate limits)"
+    docker rm -f "$ctr" > /dev/null 2>&1 || true
+    docker volume rm "$vol" > /dev/null 2>&1 || true
+    return 1
+}
 
 # Wait for Docker healthcheck to report healthy.
 wait_healthy() {
@@ -71,14 +122,22 @@ COMMON_RUN_ARGS="
 
 # run_test NAME [DOCKER_FLAGS...] CHECK_CMD
 # All args except the first (name) and last (check) are passed to docker run.
+#
+# Arg-boundary preservation: we cannot concat args into a string — values
+# with ';' (e.g. `-e WARP_ROUTER_ROUTES='dst=a;dst=b'`) would word-split on
+# re-expansion and end up as image names. Instead: rotate `"$@"` N-1 times
+# so the original last arg lands at $1 (captured as `check`), and the
+# remaining docker args stay in `"$@"` with their original boundaries.
 run_test() {
     name=$1; shift
-    docker_extra=""
-    while [ $# -gt 1 ]; do
-        docker_extra="$docker_extra $1"
-        shift
+    _n=$#
+    _i=1
+    while [ $_i -lt $_n ]; do
+        _a=$1; shift
+        set -- "$@" "$_a"
+        _i=$((_i + 1))
     done
-    check="$1"
+    check=$1; shift
 
     printf "\nTest: %s\n" "$name"
     container=$(docker run -d \
@@ -89,7 +148,8 @@ run_test() {
         --sysctl net.ipv4.conf.all.src_valid_mark=1 \
         --device-cgroup-rule 'c 10:200 rwm' \
         --health-interval=5s \
-        $docker_extra \
+        ${SHARED_STATE_VOL:+--volume "$SHARED_STATE_VOL:/var/lib/cloudflare-warp"} \
+        "$@" \
         "$IMAGE") || { fail "$name" "docker run failed"; return; }
 
     if wait_healthy "$container"; then
@@ -446,27 +506,79 @@ test_routing_override_router_routes() {
     run_test "routing override router + router routes" \
         -e WARP_MODE=tunnel_only \
         -e WARP_ROUTING_OVERRIDE=router \
-        -e 'WARP_ROUTER_ROUTES=dst=10.99.0.0/24,via=127.0.0.1; dst=fd99::/64,via=::1' \
+        -e 'WARP_ROUTER_ROUTES=dst=10.99.0.0/24,via=192.0.2.1; dst=fd99::/64,via=2001:db8::1' \
         --sysctl net.ipv4.ip_forward=1 \
         --sysctl net.ipv4.conf.all.rp_filter=0 \
         --sysctl net.ipv6.conf.all.forwarding=1 \
         --sysctl net.ipv6.conf.all.accept_ra=2 \
         "sleep 10 \
-         && ip route show 10.99.0.0/24 | grep -q '127.0.0.1' \
-         && ip -6 route show fd99::/64 | grep -q '::1'"
+         && ip route show 10.99.0.0/24 | grep -q '192.0.2.1' \
+         && ip -6 route show fd99::/64 | grep -q '2001:db8::1'"
 }
 
 test_routing_override_router_routes_malformed() {
     run_test "routing override router + malformed router routes" \
         -e WARP_MODE=tunnel_only \
         -e WARP_ROUTING_OVERRIDE=router \
-        -e 'WARP_ROUTER_ROUTES=garbage; dst=10.99.0.0/24,via=127.0.0.1' \
+        -e 'WARP_ROUTER_ROUTES=garbage; dst=10.99.0.0/24,via=192.0.2.1' \
         --sysctl net.ipv4.ip_forward=1 \
         --sysctl net.ipv4.conf.all.rp_filter=0 \
         --sysctl net.ipv6.conf.all.forwarding=1 \
         --sysctl net.ipv6.conf.all.accept_ra=2 \
         "sleep 10 \
-         && ip route show 10.99.0.0/24 | grep -q '127.0.0.1'"
+         && ip route show 10.99.0.0/24 | grep -q '192.0.2.1'"
+}
+
+# Repro for the martian-drop black hole: the probe must distinguish between
+# "masquerade rule present" and "masquerade rule missing". Approach: run
+# /healthcheck.sh directly. Flush cf-router-nat and immediately probe before
+# the watcher's 2s cycle can reinstall — the probe should fail. Restore and
+# probe again — should pass. Tests the probe itself, not just steady-state.
+test_healthcheck_detects_missing_masquerade() {
+    printf "\nTest: healthcheck detects missing masquerade\n"
+    ctr=$(docker run -d \
+        --cap-add NET_ADMIN \
+        --cap-add MKNOD \
+        --cap-add AUDIT_WRITE \
+        --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+        --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+        --sysctl net.ipv4.ip_forward=1 \
+        --sysctl net.ipv4.conf.all.rp_filter=0 \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
+        --sysctl net.ipv6.conf.all.accept_ra=2 \
+        --device-cgroup-rule 'c 10:200 rwm' \
+        --health-interval=5s \
+        -e WARP_MODE=warp \
+        -e WARP_ROUTING_OVERRIDE=router \
+        "$IMAGE") || { fail "healthcheck black-hole" "docker run failed"; return; }
+
+    if ! wait_healthy "$ctr"; then
+        fail "healthcheck black-hole" "container never went healthy"
+        docker rm -f "$ctr" > /dev/null 2>&1
+        return
+    fi
+
+    # Green state: with cf-router-nat active, the probe should succeed.
+    if docker exec "$ctr" /healthcheck.sh > /dev/null 2>&1; then
+        pass "healthcheck black-hole (green with masquerade)"
+    else
+        fail "healthcheck black-hole" "probe failed with masquerade in place"
+    fi
+
+    # Red state: flush the chain and probe in the same exec so the watcher
+    # (2s polling) can't race us. The probe must fail because peer-src
+    # packets would reach warp-svc without SNAT and be dropped as martian.
+    if docker exec "$ctr" sh -c '
+        nft flush chain inet cf-custom cf-router-nat 2>/dev/null \
+            || nft delete chain inet cf-custom cf-router-nat 2>/dev/null
+        ! /healthcheck.sh > /dev/null 2>&1
+    '; then
+        pass "healthcheck black-hole (red without masquerade)"
+    else
+        fail "healthcheck black-hole" "probe passed despite missing masquerade"
+    fi
+
+    docker rm -f "$ctr" > /dev/null 2>&1 || true
 }
 
 # ── Run ──────────────────────────────────────────────────────────────────────
@@ -478,6 +590,11 @@ if ./test-router-routes.sh; then
 else
     FAIL=$((FAIL + 1))
 fi
+
+# Seed shared registration; every run_test mounts it so only one registration
+# hits Cloudflare's API per workflow run. Failures are non-fatal — tests fall
+# back to per-container registration (and the old rate-limit flakiness).
+seed_shared_state
 
 if [ "$CI" = "1" ]; then
     test_smoke
@@ -504,6 +621,7 @@ else
     test_routing_override_router_forwarded
     test_routing_override_router_routes
     test_routing_override_router_routes_malformed
+    test_healthcheck_detects_missing_masquerade
 fi
 
 printf "\n==============================\n"

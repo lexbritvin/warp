@@ -1,8 +1,11 @@
 name: Build and push
 
 on:
+  push:
+    tags:
+      - 'v*'          # image-version bumps (e.g. v1.2.3) — always rebuild
   schedule:
-    - cron: '0 16 * * *'   # daily at 4 PM UTC
+    - cron: '0 16 * * *'   # daily at 4 PM UTC — catches new WARP releases
   workflow_dispatch:
     inputs:
       force:
@@ -19,25 +22,59 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full tag history for `git describe`
+
+      - name: Derive image version from git tag
+        id: image
+        run: |
+          # Tagged commit: use the tag exactly. Otherwise: latest reachable
+          # tag (scheduled/cron rebuilds ride the current published image
+          # version). Fallback to 0.0.0 before the first tag exists.
+          if TAG=$(git describe --exact-match --tags HEAD 2>/dev/null); then
+            :
+          elif TAG=$(git describe --tags --abbrev=0 2>/dev/null); then
+            :
+          else
+            TAG=v0.0.0
+          fi
+          IMG_VER=${TAG#v}
+          echo "version=$IMG_VER" >> "$GITHUB_OUTPUT"
+          echo "image-version=$IMG_VER"
 
       - name: Get WARP version
         id: warp
         run: |
           VERSION=$(curl -fsSL https://pkg.cloudflareclient.com/dists/noble/main/binary-amd64/Packages.gz \
             | gunzip | awk '/^Version:/ {print $2; exit}')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "warp-version=$VERSION"
 
-      - name: Check if version already published
-        id: check
+      - name: Compose full image tag
+        id: tag
+        env:
+          WARP_VER: ${{ steps.warp.outputs.version }}
+          IMG_VER:  ${{ steps.image.outputs.version }}
         run: |
-          if [ "${{ inputs.force }}" = "true" ]; then
-            echo "skip=false" >> $GITHUB_OUTPUT
+          FULL="${WARP_VER}-${IMG_VER}"
+          echo "full=$FULL" >> "$GITHUB_OUTPUT"
+          echo "full-tag=$FULL"
+
+      - name: Check if full tag already published
+        id: check
+        env:
+          FORCE: ${{ inputs.force }}
+          REPO:  ${{ github.repository }}
+          TAG:   ${{ steps.tag.outputs.full }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "Force rebuild requested."
-          elif docker manifest inspect ghcr.io/${{ github.repository }}:${{ steps.warp.outputs.version }} > /dev/null 2>&1; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "Version ${{ steps.warp.outputs.version }} already published, skipping."
+          elif docker manifest inspect "ghcr.io/${REPO}:${TAG}" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already published, skipping."
           else
-            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set up QEMU
@@ -55,7 +92,7 @@ jobs:
           load: true
           platforms: linux/amd64
           tags: warp:test
-          build-args: VERSION=${{ steps.warp.outputs.version }}
+          build-args: VERSION=${{ steps.tag.outputs.full }}
 
       - name: Run integration tests
         if: steps.check.outputs.skip == 'false'
@@ -69,6 +106,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Published tags:
+      #   latest              — always newest build
+      #   <warp>              — newest image-version for that WARP (mutable)
+      #   <warp>-<image>      — immutable: exact build
       - name: Push multi-arch image
         if: steps.check.outputs.skip == 'false'
         uses: docker/build-push-action@v6
@@ -78,4 +119,5 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ steps.warp.outputs.version }}
-          build-args: VERSION=${{ steps.warp.outputs.version }}
+            ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.full }}
+          build-args: VERSION=${{ steps.tag.outputs.full }}

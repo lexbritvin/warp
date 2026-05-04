@@ -129,6 +129,17 @@ Forces consumer account registration even when `mdm.xml` is present. Normally, t
 
 Enables WARP qlog debug output. Disabled by default.
 
+### `WARP_AUTOHEAL=1`
+
+Self-recovery for the production "stuck data plane" symptom: the H2 socket to a Cloudflare edge stays `ESTABLISHED` with bidirectional keep-alives, but no application traffic flows. `warp-cli status` reports healthy because it tracks the control-plane socket; only the data-plane probe in [healthcheck.sh](healthcheck.sh) catches it. Enabled by default.
+
+When the data-plane probe (e.g. `curl https://cloudflare.com/cdn-cgi/trace` through the TUN, or the mode-equivalent control-plane probe) has been failing continuously, the healthcheck escalates:
+
+- **L1 — after ~90 s without success**: `warp-cli disconnect; sleep 2; warp-cli connect`. Forces a new 5-tuple, usually unsticks a pinned CF anycast bucket. Registration is preserved.
+- **L2 — after ~180 s without success**: `SIGTERM` to `warp-svc`. The entrypoint's existing shutdown trap cleans up and tini exits 0 — your `restart` policy must bring the container back up. **Pair with `restart: unless-stopped` (or stricter)** for L2 to be effective; without a restart policy, L2 just stops the container.
+
+Heal actions run in the background so the healthcheck still returns within Docker's `--timeout=10s`. Set `WARP_AUTOHEAL=0` to disable (useful when debugging unexpected restarts) — with autoheal off, the script is bit-for-bit identical to the pre-autoheal behaviour.
+
 ---
 
 ## Environment variable reference
@@ -142,6 +153,7 @@ Enables WARP qlog debug output. Disabled by default.
 | `WARP_ROUTING_OVERRIDE` | `none` | Routing override mode: `none` (default), `unmanaged` (= legacy `1`, strip WARP nft + table 65743), or `router` (NAT gateway for peer containers). |
 | `WARP_ROUTER_ROUTES` | _(empty)_ | Static return routes for `router` mode. Semicolon-separated `dst=CIDR,via=GW` entries; family auto-detected. |
 | `WARP_MSS_CLAMP` | `1` | Clamp TCP MSS to path MTU for forwarded traffic. Disable only if your routing daemon handles this. |
+| `WARP_AUTOHEAL` | `1` | Auto-recover stuck data plane: `warp-cli` reconnect after ~90 s, `SIGTERM warp-svc` after ~180 s (relies on container restart policy). `0` to disable. |
 | `WARP_DNS_EXPOSE` | `0` | DNAT port 53 to Cloudflare DNS. Set to `1` to enable. |
 | `WARP_PROXY_EXPOSE` | `0` | DNAT SOCKS5 port to loopback for port mapping. Set to `1` to enable. |
 | `WARP_CONSUMER_REGISTER` | _(empty)_ | Force consumer registration even when `mdm.xml` exists. |

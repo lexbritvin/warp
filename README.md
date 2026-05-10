@@ -129,6 +129,32 @@ Forces consumer account registration even when `mdm.xml` is present. Normally, t
 
 Enables WARP qlog debug output. Disabled by default.
 
+### `WARP_TUNNEL_PROTOCOL` / `WARP_MASQUE_OPTIONS`
+
+Pass-through to `warp-cli tunnel protocol` and `warp-cli tunnel masque-options`. Both unset = leave warp-cli's own default in place. Defaults observed in the bundled warp-cli (`warp-cli tunnel protocol set --help`, `warp-cli tunnel masque-options set --help`): `MASQUE` for protocol, `h3-with-h2-fallback` for MASQUE options.
+
+| Variable | Value | Behavior |
+|---|---|---|
+| `WARP_TUNNEL_PROTOCOL` | `MASQUE` _(default)_ | MASQUE over HTTP/3 or HTTP/2 connect-ip |
+| | `WireGuard` | Legacy WG transport |
+| | `reset` | Revert to client default |
+| `WARP_MASQUE_OPTIONS` | `h3-only` | Pure HTTP/3, no TCP fallback |
+| | `h2-only` | MASQUE over HTTP/2 only |
+| | `h3-with-h2-fallback` _(default)_ | Try HTTP/3, fall back to HTTP/2 if it fails |
+| | `reset` | Revert to client default |
+
+Both values are persisted by warp-svc inside `STATE_DIRECTORY`, so they survive container restarts that mount the same volume — env vars matter primarily for **fresh deploys / reproducible builds** where the volume might start empty. The entrypoint re-applies on every start, so a mounted volume + env-var combo always converges to the env-var value (env wins on every boot, idempotently).
+
+Both subcommands are marked **Consumer only** by warp-cli. On a Zero Trust registration the underlying setter exits non-zero; the entrypoint logs `WARNING:` and continues — startup does not fail. Older warp-cli builds without the `tunnel protocol` / `tunnel masque-options` subcommands are also handled gracefully (logged-and-skipped, not fatal).
+
+Pin to MASQUE + h3-only when you want pure QUIC end-to-end — useful when downstream services reject MASQUE-over-H2 racing, or for QUIC-specific diagnostics, or to avoid the WG-WARP egress IP pool (e.g. `[www.youtube.com](https://www.youtube.com)` rejects QUIC from WG-WARP IPs but accepts it from MASQUE-WARP IPs):
+
+```yaml
+environment:
+  WARP_TUNNEL_PROTOCOL: "MASQUE"
+  WARP_MASQUE_OPTIONS: "h3-only"
+```
+
 ### `WARP_AUTOHEAL=1`
 
 Self-recovery for the production "stuck data plane" symptom: the H2 socket to a Cloudflare edge stays `ESTABLISHED` with bidirectional keep-alives, but no application traffic flows. `warp-cli status` reports healthy because it tracks the control-plane socket; only the data-plane probe in [healthcheck.sh](healthcheck.sh) catches it. Enabled by default.
@@ -158,6 +184,8 @@ Heal actions run in the background so the healthcheck still returns within Docke
 | `WARP_PROXY_EXPOSE` | `0` | DNAT SOCKS5 port to loopback for port mapping. Set to `1` to enable. |
 | `WARP_CONSUMER_REGISTER` | _(empty)_ | Force consumer registration even when `mdm.xml` exists. |
 | `WARP_DEBUG_QLOG` | _(empty)_ | Enable WARP qlog debug output. |
+| `WARP_TUNNEL_PROTOCOL` | _(unset → client default)_ | Pin tunnel protocol: `MASQUE`, `WireGuard`, or `reset`. Consumer accounts only. See [WARP_TUNNEL_PROTOCOL / WARP_MASQUE_OPTIONS](#warp_tunnel_protocol--warp_masque_options). |
+| `WARP_MASQUE_OPTIONS` | _(unset → client default)_ | MASQUE transport: `h3-only`, `h2-only`, `h3-with-h2-fallback`, or `reset`. Consumer accounts only. |
 | `STATE_DIRECTORY` | `/var/lib/cloudflare-warp` | warp-svc persistent state. Mount a volume here to persist registration across restarts. |
 | `RUNTIME_DIRECTORY` | `/run/cloudflare-warp` | warp-svc runtime socket directory. |
 | `LOGS_DIRECTORY` | `/run/log/cloudflare-warp` | warp-svc log directory. |

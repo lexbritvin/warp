@@ -7,6 +7,48 @@ WARP_RT=65743
 
 . /router-routes.sh
 
+# apply_tunnel_setting NAME VALUE SUB ALLOWED_PIPE_PATTERN
+#
+# Pass-through wrapper for `warp-cli --accept-tos tunnel <SUB> set|reset`
+# driven by env var $NAME. Empty value = silent no-op. Invalid value =
+# fatal. Subcommand missing in this warp-cli build = WARN + skip. Runtime
+# failure (Consumer-only on Zero Trust, transient warp-svc) = WARN +
+# continue — opt-in tuning knobs shouldn't kill startup.
+#
+# Idempotent: warp-svc no-ops repeated identical writes without churning
+# the tunnel, same as warp-cli mode / proxy port / dns families.
+apply_tunnel_setting() {
+    name=$1; val=$2; sub=$3; allowed=$4
+    [ -n "$val" ] || return 0
+    # POSIX-clean membership test: a `case` pattern built from an expanded
+    # variable treats `|` as literal, not as case-alternation, so we split
+    # on `|` and compare each alternative explicitly.
+    if [ "$val" != "reset" ]; then
+        old_ifs=$IFS; IFS='|'; matched=0
+        for _x in $allowed; do
+            [ "$val" = "$_x" ] && { matched=1; break; }
+        done
+        IFS=$old_ifs
+        if [ "$matched" = "0" ]; then
+            echo "ERROR: $name='$val' invalid; expected one of $allowed, or reset" >&2
+            exit 1
+        fi
+    fi
+    if ! warp-cli tunnel "$sub" --help >/dev/null 2>&1; then
+        echo "WARNING: warp-cli has no 'tunnel $sub' subcommand; skipping $name"
+        return 0
+    fi
+    if [ "$val" = "reset" ]; then
+        echo "Reset tunnel $sub to client default"
+        warp-cli --accept-tos tunnel "$sub" reset \
+            || echo "WARNING: tunnel $sub reset failed (Consumer-only; not available on Zero Trust)"
+    else
+        echo "Set tunnel $sub: $val"
+        warp-cli --accept-tos tunnel "$sub" set "$val" \
+            || echo "WARNING: tunnel $sub set failed (Consumer-only; not available on Zero Trust)"
+    fi
+}
+
 handle_shutdown() {
     echo "Received $1"
     echo "Disconnecting..."
@@ -100,6 +142,9 @@ if [ -z "$WARP_DEBUG_QLOG" ]; then
 else
     warp-cli debug qlog enable
 fi
+
+apply_tunnel_setting WARP_TUNNEL_PROTOCOL "$WARP_TUNNEL_PROTOCOL" protocol       'MASQUE|WireGuard'
+apply_tunnel_setting WARP_MASQUE_OPTIONS  "$WARP_MASQUE_OPTIONS"  masque-options 'h3-only|h2-only|h3-with-h2-fallback'
 
 echo "Connecting to WARP"
 warp-cli connect

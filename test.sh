@@ -581,6 +581,39 @@ test_healthcheck_detects_missing_masquerade() {
     docker rm -f "$ctr" > /dev/null 2>&1 || true
 }
 
+test_tunnel_protocol_masque_h3() {
+    # Distinguish from default-mode output: with no env vars, settings shows
+    # `MASQUE (HTTP/3 with HTTP/2 fallback)` — anchored `$` rules that out.
+    # Also assert the protocol line is tagged `(consumer overrides)`, which
+    # only appears when our entrypoint explicitly set it (default is
+    # `(network policy)`).
+    run_test "tunnel protocol MASQUE + h3-only" \
+        -e WARP_TUNNEL_PROTOCOL=MASQUE \
+        -e WARP_MASQUE_OPTIONS=h3-only \
+        "warp-cli --accept-tos settings 2>/dev/null | grep -qE 'MASQUE \\(HTTP/3\\)$' \
+         && warp-cli --accept-tos settings 2>/dev/null | grep -qE '\\(consumer overrides\\)[^A-Za-z]+WARP tunnel protocol: MASQUE'"
+}
+
+# Negative path: invalid env value must be rejected by entrypoint validation
+# before warp-svc even tries to apply it. Don't use run_test (it expects the
+# container to go healthy); we want it to exit non-zero with a specific stderr.
+test_tunnel_protocol_invalid() {
+    printf "\nTest: tunnel protocol invalid value rejected\n"
+    out=$(docker run --rm \
+        --cap-add NET_ADMIN \
+        --cap-add MKNOD \
+        --cap-add AUDIT_WRITE \
+        --device-cgroup-rule 'c 10:200 rwm' \
+        -e WARP_TUNNEL_PROTOCOL=bogus \
+        "$IMAGE" 2>&1)
+    if echo "$out" | grep -q "WARP_TUNNEL_PROTOCOL='bogus' invalid"; then
+        pass "tunnel protocol invalid rejected"
+    else
+        fail "tunnel protocol invalid rejected" "did not see expected error"
+        echo "$out" | tail -10
+    fi
+}
+
 # ── Run ──────────────────────────────────────────────────────────────────────
 
 # Host-side parser unit tests — no docker required.
@@ -622,6 +655,8 @@ else
     test_routing_override_router_routes
     test_routing_override_router_routes_malformed
     test_healthcheck_detects_missing_masquerade
+    test_tunnel_protocol_masque_h3
+    test_tunnel_protocol_invalid
 fi
 
 printf "\n==============================\n"

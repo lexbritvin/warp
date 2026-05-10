@@ -147,7 +147,7 @@ Both values are persisted by warp-svc inside `STATE_DIRECTORY`, so they survive 
 
 Both subcommands are marked **Consumer only** by warp-cli. On a Zero Trust registration the underlying setter exits non-zero; the entrypoint logs `WARNING:` and continues — startup does not fail. Older warp-cli builds without the `tunnel protocol` / `tunnel masque-options` subcommands are also handled gracefully (logged-and-skipped, not fatal).
 
-Pin to MASQUE + h3-only when you want pure QUIC end-to-end — useful when downstream services reject MASQUE-over-H2 racing, or for QUIC-specific diagnostics, or to avoid the WG-WARP egress IP pool (e.g. `[www.youtube.com](https://www.youtube.com)` rejects QUIC from WG-WARP IPs but accepts it from MASQUE-WARP IPs):
+Pin to MASQUE + h3-only when you want pure QUIC end-to-end — useful when an upstream service negotiates differently against H3 vs H2 racing, or for QUIC-specific diagnostics where the racing fallback would obscure which path is in use:
 
 ```yaml
 environment:

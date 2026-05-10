@@ -103,12 +103,12 @@ sysctls:
 
 ### `WARP_ROUTER_ROUTES`
 
-Static routes installed in the warp container for return traffic in `router` mode. Needed when peer containers forward traffic from subnets that aren't directly connected to warp's bridge — e.g. a WG-easy + sing-box chain where WireGuard clients live on `10.20.0.0/24` behind sing-box at `10.20.1.3`. Replies come back through the WARP tunnel, get un-masqueraded to the client address, and warp has no route back — so return packets go to the default gateway and are lost.
+Static routes installed in the warp container for return traffic in `router` mode. Needed when a peer container forwards traffic from a downstream subnet that isn't directly connected to warp's bridge — e.g. another routing daemon (sing-box, a WireGuard server, a nested NAT) whose clients live on a private subnet behind it. Replies come back through the WARP tunnel, get un-masqueraded to the client address, and warp has no route back — so return packets go to the default gateway and are lost.
 
 Format: semicolon-separated entries, each `dst=CIDR,via=GW`. Family (IPv4/IPv6) is auto-detected from the destination. The format is strict: no whitespace around `=`, no extra fields. Malformed entries, obviously broken CIDRs, and any attempt to install a default route (`0.0.0.0/0`, `::/0`, `default`, or any `/0` prefix) are logged and skipped — not fatal. Rejecting default routes is deliberate: `ip route replace` would otherwise clobber the container/host's own default and silently break egress.
 
 ```
-WARP_ROUTER_ROUTES=dst=10.20.0.0/24,via=10.20.1.3; dst=fd3d:99e:5f4c:a::/64,via=fd3d:99e:5f4c:a1::3
+WARP_ROUTER_ROUTES=dst=10.99.0.0/24,via=192.0.2.1; dst=fd99::/64,via=2001:db8::1
 ```
 
 Routes are installed via `ip route replace` inside the same watcher that maintains the router-mode NAT chain, so they're re-applied every ~2 s and survive any `warp-svc` route rewrites. Ignored with a warning outside `router` mode.

@@ -54,9 +54,25 @@ handle_shutdown() {
     echo "Disconnecting..."
     warp-cli disconnect || true
     echo "Stopping warp-svc and dbus..."
-    kill ${FIREWALL_WATCHER_PID:-} $WARP_PID $DBUS_PID ${WARP_LOG_FILTER_PID:-} || true
+    kill "${FIREWALL_WATCHER_PID:-}" 2>/dev/null || true
+    # warp-svc can take several seconds to exit on SIGTERM (the 2026.6+ client
+    # tears down TPM / registration state on the way out). Bound that wait and
+    # escalate to SIGKILL so the container always stops well within docker's
+    # grace period instead of being force-killed as a whole (exit 137).
+    if [ -n "${WARP_PID:-}" ]; then
+        kill "$WARP_PID" 2>/dev/null || true
+        i=0
+        while [ "$i" -lt 16 ] && kill -0 "$WARP_PID" 2>/dev/null; do
+            sleep 0.5
+            i=$((i + 1))
+        done
+        kill -9 "$WARP_PID" 2>/dev/null || true
+    fi
+    # Log filter is killed last so warp-svc's final output still drains.
+    kill "${DBUS_PID:-}" "${WARP_LOG_FILTER_PID:-}" 2>/dev/null || true
     echo "Finished"
     trap - EXIT
+    exit 0
 }
 trap "handle_shutdown SIGTERM" SIGTERM
 trap "handle_shutdown SIGINT" SIGINT
@@ -112,7 +128,10 @@ done
 echo ""
 echo "WARP service loaded"
 
-# If there is no registration, make a new one.
+# If there is no registration, make a new one. reg.json is written only after
+# a successful registration and is present on disk the moment a persisted
+# volume mounts, so this file check is instant and race-free — unlike querying
+# the daemon, which races with warp-svc loading the registration on restart.
 if [ ! -f "$STATE_DIRECTORY/reg.json" ]; then
     # WARP_CONSUMER_REGISTER forces consumer registration even when mdm.xml exists.
     if [ ! -f "$STATE_DIRECTORY/mdm.xml" ] || [ -n "$WARP_CONSUMER_REGISTER" ]; then

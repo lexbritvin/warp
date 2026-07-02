@@ -334,7 +334,19 @@ test_state_persistence() {
         "$IMAGE") || { fail "state persistence" "second docker run failed"; docker volume rm "$vol" > /dev/null 2>&1; return; }
 
     if wait_running "$ctr"; then
-        if docker logs "$ctr" 2>&1 | grep -q "already registered"; then
+        # The entrypoint logs its registration decision only after warp-svc
+        # settles — the 2026.6+ client churns through a registration refresh at
+        # startup, well after `warp-cli status` first responds (which is all
+        # wait_running waits for). So poll for the decision instead of reading
+        # the log once, and stop early if it (wrongly) re-registered.
+        reused=0
+        i=0
+        while [ $i -lt 30 ]; do
+            if docker logs "$ctr" 2>&1 | grep -q "already registered"; then reused=1; break; fi
+            if docker logs "$ctr" 2>&1 | grep -q "Warp client registered!"; then break; fi
+            sleep 1; i=$((i + 1))
+        done
+        if [ "$reused" = "1" ]; then
             pass "state persistence"
         else
             fail "state persistence" "second run did not reuse registration"
@@ -627,7 +639,8 @@ fi
 # Seed shared registration; every run_test mounts it so only one registration
 # hits Cloudflare's API per workflow run. Failures are non-fatal — tests fall
 # back to per-container registration (and the old rate-limit flakiness).
-seed_shared_state
+# `|| true` so a warm-up timeout doesn't trip `set -e` and abort the run.
+seed_shared_state || true
 
 if [ "$CI" = "1" ]; then
     test_smoke

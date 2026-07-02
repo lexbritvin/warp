@@ -4,6 +4,7 @@ FROM --platform=$BUILDPLATFORM alpine:latest AS debextract
 ARG TARGETARCH
 
 RUN <<EOF
+    set -e   # fail the build on any step's error, not just the last one
     apk add --no-cache curl tar binutils
     case "$TARGETARCH" in
         amd64) PKG_ARCH="amd64" ;;
@@ -24,8 +25,14 @@ EOF
 FROM ghcr.io/void-linux/void-glibc-busybox:latest AS fs
 
 RUN <<EOF
+    # set -e so a failed repo sync / package install aborts the build instead
+    # of silently shipping an image missing tini, dbus, warp libs, etc.
+    set -e
     xbps-install -Syu xbps
-    xbps-install -y dbus-libs nspr nss libgcc dbus nftables curl tini iproute2
+    # tpm2-tss provides libtss2-esys.so.0 / libtss2-tctildr.so.0, which the
+    # 2026.6+ warp-svc links against for hardware-backed (TPM) registration.
+    # Without it warp-svc fails at load: "libtss2-esys.so.0: cannot open ...".
+    xbps-install -y dbus-libs nspr nss libgcc dbus nftables curl tini iproute2 tpm2-tss
     rm -rf /var/cache/xbps/*
 EOF
 
